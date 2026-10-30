@@ -318,6 +318,6 @@ env:
     difficulty: easy
     max_choices: 50
     train_ratio: 0.8
-    src_path: /workspace/wiki-run/wikirace/src
-    wikigraph_path: ~           # null → uses wikirace internal DATA_DIR
+    src_path: ~                 # null → uses vendored engine in env_package/wikirace/vendor/src
+    wikigraph_path: ~           # null → uses vendored DATA_DIR (vendor/data/wikidata)
     custom_splits_path: ~       # null → uses difficulty-based splits CSV

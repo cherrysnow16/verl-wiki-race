@@ -15,6 +15,7 @@
 
 from typing import List, Tuple, Dict, Union, Any
 from collections import defaultdict
+import sys
 import torch
 import numpy as np
 from functools import partial
@@ -608,18 +609,22 @@ class WikiRaceEnvironmentManager(EnvironmentManagerBase):
 
     def reset(self, kwargs):
         state_list, infos = self.envs.reset()
+        self._states = state_list  # states the model will act on next
         self.memory.reset(batch_size=len(state_list))
         text_obs = self.build_text_obs(state_list, init=True)
         observations = {
             "text": text_obs,
             "image": None,
             "anchor": text_obs.copy(),
+            "system": WIKIRACE_SYSTEM_PROMPT,
         }
         return observations, infos
 
     def step(self, text_actions):
-        int_actions, valids = self.projection_f(text_actions)
+        neighbors_list = [s.available_choices for s in self._states]
+        int_actions, valids = self.projection_f(text_actions, neighbors_list=neighbors_list)
         state_list, rewards, dones, infos = self.envs.step(int_actions)
+        self._states = state_list  # advance to the next states
         self.memory.store({
             "text_obs": [s.current_page for s in state_list],
             "action": int_actions,
@@ -631,6 +636,7 @@ class WikiRaceEnvironmentManager(EnvironmentManagerBase):
             "text": text_obs,
             "image": None,
             "anchor": text_obs.copy(),
+            "system": WIKIRACE_SYSTEM_PROMPT,
         }
         rewards = to_numpy(rewards)
         dones = to_numpy(dones)
@@ -644,19 +650,21 @@ class WikiRaceEnvironmentManager(EnvironmentManagerBase):
                 f"{j}: {title}"
                 for j, title in enumerate(s.available_choices)
             )
+            max_choice_num = len(s.available_choices) - 1
             if not use_history:
                 obs = WIKIRACE_TEMPLATE_NO_HIS.format(
                     current_page=s.current_page,
                     target_page=s.target_page,
                     choices_list=choices_list,
+                    max_choice_num=max_choice_num,
                 )
             else:
                 obs = WIKIRACE_TEMPLATE.format(
                     current_page=s.current_page,
                     target_page=s.target_page,
                     history=" -> ".join(s.history),
-                    step_count=s.step_number,
                     choices_list=choices_list,
+                    max_choice_num=max_choice_num,
                 )
             result.append(obs)
         return result
@@ -761,7 +769,10 @@ def make_envs(config):
     elif "wikirace" in config.env.env_name.lower():
         from agent_system.environments.env_package.wikirace import build_wikirace_envs, wikirace_projection
         import ray
-        wikirace_src = config.env.wikirace.get("src_path", "/workspace/wiki-run/wikirace/src")
+        # Default to the vendored engine shipped in env_package/wikirace/vendor/src.
+        _vendor_src = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "env_package", "wikirace", "vendor", "src")
+        wikirace_src = config.env.wikirace.get("src_path") or _vendor_src
         wikigraph_path = config.env.wikirace.get("wikigraph_path", None)  # None → wikirace internal DATA_DIR
         if wikirace_src not in sys.path:
             sys.path.insert(0, wikirace_src)
@@ -770,6 +781,9 @@ def make_envs(config):
         wikigraph_ref = ray.put(load_wikigraph(wikigraph_path))
         print("WikiGraph loaded and stored in Ray Object Store.")
 
+        train_ratio = config.env.wikirace.get("train_ratio", 0.8)
+        # val_train_ratio=0.0 → val pool covers all game IDs (no train/val split)
+        val_train_ratio = config.env.wikirace.get("val_train_ratio", train_ratio)
         env_kwargs = {
             "difficulty":      config.env.wikirace.difficulty,
             "max_choices":     config.env.wikirace.get("max_choices", 50),
@@ -777,8 +791,16 @@ def make_envs(config):
             "wikirace_src":    wikirace_src,
             "wikigraph_path":  wikigraph_path,
             "wikigraph_ref":   wikigraph_ref,
-            "train_ratio":     config.env.wikirace.get("train_ratio", 0.8),
+            "train_ratio":     train_ratio,
         }
+        val_env_kwargs = {**env_kwargs, "train_ratio": val_train_ratio}
+        # Separate pair files for train / val: each side uses its whole file.
+        train_splits = config.env.wikirace.get("train_splits_path", None)
+        val_splits = config.env.wikirace.get("val_splits_path", None)
+        if train_splits:
+            env_kwargs.update(custom_splits_path=train_splits, train_ratio=1.0)
+        if val_splits:
+            val_env_kwargs.update(custom_splits_path=val_splits, train_ratio=0.0)
         _envs = build_wikirace_envs(
             seed=config.env.seed,
             env_num=config.data.train_batch_size,
@@ -792,7 +814,7 @@ def make_envs(config):
             env_num=config.data.val_batch_size,
             group_n=1,
             is_train=False,
-            env_kwargs=env_kwargs,
+            env_kwargs=val_env_kwargs,
             resources_per_worker=resources_per_worker,
         )
         projection_f = partial(wikirace_projection)

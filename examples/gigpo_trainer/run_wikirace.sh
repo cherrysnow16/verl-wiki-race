@@ -6,9 +6,9 @@ num_cpus_per_env_worker=0.1
 
 # ---- sizes ---------------------------------------------------------------
 # easy: 200 games total → 160 train / 40 val  (train_ratio=0.8)
-# Keep val_data_size <= 40 to avoid duplicate game sampling.
+# val_train_ratio=0.0 → val pool = all 200 games, evaluated without replacement.
 train_data_size=8
-val_data_size=8
+val_data_size=128
 
 # ---- data prep (text modality, dummy rows – actual obs come from env) ----
 python3 -m examples.data_preprocess.prepare \
@@ -23,11 +23,11 @@ python3 -m verl.trainer.main_ppo \
     data.train_batch_size=$train_data_size \
     data.val_batch_size=$val_data_size \
     data.max_prompt_length=2048 \
-    data.max_response_length=1024 \
+    data.max_response_length=10000 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     data.return_raw_chat=True \
-    actor_rollout_ref.model.path=Qwen/Qwen2.5-1.5B-Instruct \
+    actor_rollout_ref.model.path=meta-llama/Llama-3.2-3B-Instruct \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=8 \
@@ -41,11 +41,12 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=$ENGINE \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.4 \
     actor_rollout_ref.rollout.enable_chunked_prefill=False \
+    actor_rollout_ref.rollout.max_num_batched_tokens=12288 \
     actor_rollout_ref.rollout.enforce_eager=False \
     actor_rollout_ref.rollout.free_cache_engine=False \
-    actor_rollout_ref.rollout.val_kwargs.temperature=0.7 \
+    actor_rollout_ref.rollout.val_kwargs.temperature=0.4 \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
@@ -63,8 +64,6 @@ python3 -m verl.trainer.main_ppo \
     env.resources_per_worker.num_cpus=$num_cpus_per_env_worker \
     env.wikirace.difficulty=easy \
     env.wikirace.max_choices=50 \
-    env.wikirace.train_ratio=0.8 \
-    env.wikirace.src_path=/workspace/wiki-run/wikirace/src \
     trainer.critic_warmup=0 \
     trainer.logger=['console'] \
     trainer.project_name='verl_agent_wikirace' \

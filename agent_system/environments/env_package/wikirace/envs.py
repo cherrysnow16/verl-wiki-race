@@ -4,6 +4,10 @@ import gymnasium as gym
 import ray
 import numpy as np
 
+# Vendored LLM_wikirace engine shipped inside this package (see vendor/NOTICE.md).
+# Used as the default source path so WikiRace runs without a separate install.
+_VENDOR_SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vendor", "src")
+
 
 class WikiRaceWorker:
     """
@@ -32,6 +36,30 @@ class WikiRaceWorker:
         self.test_pages = load_test_pages(splits_path)
         self.current_state = None
         self._set_pages(game_id)
+        self._cache_target_distances()
+
+    def _cache_target_distances(self):
+        """The engine re-runs a full-graph BFS on every step; keep the current target's distances instead.
+
+        Only dist_matrix is read after initialize_game, so it is stored as float16
+        (small integer distances and inf are exact) to bound per-worker memory.
+        initialize_game also needs predecessors, so reset() clears the cache first.
+        """
+        graph = self.game_engine.link_graph
+        bfs = graph.get_shortest_path_arrays
+        cache = self._bfs_cache = {}
+
+        def cached(node1, node2=None):
+            if node2 is not None:
+                return bfs(node1, node2)
+            if cache.get("target") == node1:
+                return cache["arrays"]
+            arrays = bfs(node1)
+            cache["target"] = node1
+            cache["arrays"] = {"dist_matrix": arrays["dist_matrix"].astype(np.float16)}
+            return arrays
+
+        graph.get_shortest_path_arrays = cached
 
     def _set_pages(self, game_id):
         self.game_id = game_id
@@ -42,6 +70,7 @@ class WikiRaceWorker:
         """Reset the environment, optionally switching to a different game."""
         if game_id is not None:
             self._set_pages(game_id)
+        self._bfs_cache.clear()
         self.current_state = self.game_engine.initialize_game(
             inference_engine_name="verl-agent",
             current_page=self.start_page,
@@ -108,7 +137,7 @@ class WikiRaceMultiProcessEnv(gym.Env):
         difficulty      = env_kwargs.get("difficulty", "easy")
         max_choices     = env_kwargs.get("max_choices", 50)
         max_path_length = env_kwargs.get("max_path_length", 30)
-        wikirace_src    = env_kwargs.get("wikirace_src", "/workspace/wiki-run/wikirace/src")
+        wikirace_src    = env_kwargs.get("wikirace_src") or _VENDOR_SRC
         wikigraph_path  = env_kwargs.get("wikigraph_path", None)
         train_ratio     = env_kwargs.get("train_ratio", 0.8)
 
@@ -122,8 +151,7 @@ class WikiRaceMultiProcessEnv(gym.Env):
         # Lazy import of wikirace modules
         if wikirace_src not in sys.path:
             sys.path.insert(0, wikirace_src)
-        from LLM_wikirace.data_utils import load_wikigraph
-        from LLM_wikirace.wikirace_env import get_possible_game_ids
+        from LLM_wikirace.data_utils import load_wikigraph, load_test_pages
 
         # Accept a pre-loaded ref so train and val envs can share one WikiGraph.
         if env_kwargs.get("wikigraph_ref") is not None:
@@ -132,7 +160,8 @@ class WikiRaceMultiProcessEnv(gym.Env):
             wikigraph_ref = ray.put(load_wikigraph(wikigraph_path))
 
         # Split game IDs into train / val pools
-        all_ids = get_possible_game_ids(difficulty)
+        # Game ids index rows of the splits file (custom files may have any length)
+        all_ids = list(range(len(load_test_pages(splits_path))))
         split_idx = int(len(all_ids) * train_ratio)
         self.game_ids = all_ids[:split_idx] if is_train else all_ids[split_idx:]
 

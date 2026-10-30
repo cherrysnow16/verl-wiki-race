@@ -87,10 +87,15 @@ class TrajectoryCollector:
             print(f"Warning: No text observation found!")
 
         
-        chat = np.array([{
+        chat = [{
             "content": obs_content,
             "role": "user",
-        }])
+        }]
+        # Optional env-provided system message (e.g. WikiRace mirrors the original benchmark's)
+        system_prompt = obs.get('system', None)
+        if system_prompt is not None:
+            chat.insert(0, {"content": system_prompt, "role": "system"})
+        chat = np.array(chat)
         
         # Apply chat template
         prompt_with_chat_template = self.tokenizer.apply_chat_template(
